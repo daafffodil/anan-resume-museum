@@ -8,8 +8,11 @@ import {
   Filter,
   LogIn,
   LogOut,
+  Pencil,
   Plus,
   Sparkles,
+  Trash2,
+  Upload,
 } from "lucide-react";
 import { supabase } from "./lib/supabase";
 
@@ -18,6 +21,7 @@ function cn(...classes) {
 }
 
 const emptyForm = {
+  id: null,
   title: "",
   direction: "AI产品运营",
   status: "草稿",
@@ -31,7 +35,6 @@ const emptyForm = {
 
 export default function App() {
   const isAdminPage = window.location.pathname === "/admin";
-
   return isAdminPage ? <AdminPage /> : <FrontPage />;
 }
 
@@ -91,7 +94,7 @@ function FrontPage() {
             </h1>
 
             <p className="mt-6 max-w-3xl text-lg leading-8 text-[#4f4f4f] md:text-xl">
-              前台现在直接从 Supabase 数据库读取卡片内容。你在后台新增卡片后，这里刷新就会显示。
+              前台现在直接从 Supabase 数据库读取卡片内容。你在后台新增、编辑、删除卡片后，这里刷新就会显示。
             </p>
           </div>
 
@@ -288,6 +291,13 @@ function AdminPage() {
   const [saveMessage, setSaveMessage] = useState("");
   const [saveError, setSaveError] = useState("");
 
+  const [adminItems, setAdminItems] = useState([]);
+  const [loadingList, setLoadingList] = useState(false);
+
+  const [uploadingPdf, setUploadingPdf] = useState(false);
+  const [uploadMessage, setUploadMessage] = useState("");
+  const [uploadError, setUploadError] = useState("");
+
   useEffect(() => {
     async function getSessionNow() {
       const { data } = await supabase.auth.getSession();
@@ -306,6 +316,27 @@ function AdminPage() {
     return () => subscription.unsubscribe();
   }, []);
 
+  useEffect(() => {
+    if (session) {
+      fetchAdminItems();
+    }
+  }, [session]);
+
+  async function fetchAdminItems() {
+    setLoadingList(true);
+    const { data, error } = await supabase
+      .from("resumes")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.error("后台读取列表失败：", error);
+    } else {
+      setAdminItems(data || []);
+    }
+    setLoadingList(false);
+  }
+
   async function handleLogin(e) {
     e.preventDefault();
     setLoginError("");
@@ -322,6 +353,106 @@ function AdminPage() {
 
   async function handleLogout() {
     await supabase.auth.signOut();
+  }
+
+  function handleEdit(item) {
+    setForm({
+      id: item.id,
+      title: item.title || "",
+      direction: item.direction || "AI产品运营",
+      status: item.status || "草稿",
+      when_text: item.when_text || "",
+      company: item.company || "",
+      jd_title: item.jd_title || "",
+      summary: item.summary || "",
+      tags_text: (item.tags || []).join("，"),
+      pdf_url: item.pdf_url || "",
+    });
+
+    setSaveMessage("");
+    setSaveError("");
+    setUploadMessage("");
+    setUploadError("");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function handleDelete(id) {
+    const ok = window.confirm("确认删除这张卡片吗？删除后无法恢复。");
+    if (!ok) return;
+
+    const { error } = await supabase.from("resumes").delete().eq("id", id);
+
+    if (error) {
+      alert(error.message || "删除失败");
+    } else {
+      if (form.id === id) {
+        setForm(emptyForm);
+      }
+      await fetchAdminItems();
+      alert("删除成功");
+    }
+  }
+
+  function handleCancelEdit() {
+    setForm(emptyForm);
+    setSaveMessage("");
+    setSaveError("");
+    setUploadMessage("");
+    setUploadError("");
+  }
+
+  async function handlePdfUpload(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadMessage("");
+    setUploadError("");
+
+    if (file.type !== "application/pdf") {
+      setUploadError("请上传 PDF 文件。");
+      return;
+    }
+
+    setUploadingPdf(true);
+
+    const originalName = file.name || "resume.pdf";
+    const hasPdfExtension = originalName.toLowerCase().endsWith(".pdf");
+    const baseName = originalName.replace(/\.pdf$/i, "");
+
+    const asciiBase = baseName
+      .normalize("NFKD")
+      .replace(/[^\x00-\x7F]/g, "")
+      .replace(/[^a-zA-Z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .toLowerCase();
+
+    const finalBase = asciiBase || "resume";
+    const filePath = `${Date.now()}-${finalBase}${hasPdfExtension ? ".pdf" : ".pdf"}`;
+
+    const { error: storageUploadError } = await supabase.storage
+      .from("resume-pdfs")
+      .upload(filePath, file, {
+        cacheControl: "3600",
+        upsert: true,
+        contentType: "application/pdf",
+      });
+
+    if (storageUploadError) {
+      setUploadError(storageUploadError.message || "上传失败");
+      setUploadingPdf(false);
+      return;
+    }
+
+    const { data } = supabase.storage.from("resume-pdfs").getPublicUrl(filePath);
+
+    setForm((prev) => ({
+      ...prev,
+      pdf_url: data.publicUrl,
+    }));
+
+    setUploadMessage("PDF 上传成功，链接已自动填入。");
+    setUploadingPdf(false);
+    e.target.value = "";
   }
 
   async function handleSubmit(e) {
@@ -345,13 +476,27 @@ function AdminPage() {
       pdf_url: form.pdf_url.trim(),
     };
 
-    const { error } = await supabase.from("resumes").insert(payload);
+    let error = null;
+
+    if (form.id) {
+      const result = await supabase
+        .from("resumes")
+        .update(payload)
+        .eq("id", form.id);
+      error = result.error;
+    } else {
+      const result = await supabase.from("resumes").insert(payload);
+      error = result.error;
+    }
 
     if (error) {
       setSaveError(error.message || "保存失败");
     } else {
-      setSaveMessage("保存成功。现在去前台刷新页面，就能看到新卡片。");
+      setSaveMessage(form.id ? "更新成功。" : "保存成功。");
       setForm(emptyForm);
+      setUploadMessage("");
+      setUploadError("");
+      await fetchAdminItems();
     }
 
     setSaving(false);
@@ -360,7 +505,7 @@ function AdminPage() {
   if (loadingSession) {
     return (
       <div className="min-h-screen bg-[#f7f7f7] px-6 py-10 text-[#111111]">
-        <div className="mx-auto max-w-3xl rounded-[28px] border border-black/10 bg-white p-8">
+        <div className="mx-auto max-w-5xl rounded-[28px] border border-black/10 bg-white p-8">
           正在检查登录状态…
         </div>
       </div>
@@ -369,7 +514,7 @@ function AdminPage() {
 
   return (
     <div className="min-h-screen bg-[#f7f7f7] px-6 py-10 text-[#111111]">
-      <div className="mx-auto max-w-3xl">
+      <div className="mx-auto max-w-5xl">
         <div className="mb-6 flex items-center justify-between">
           <div>
             <p className="text-sm uppercase tracking-[0.12em] text-[#707070]">
@@ -392,7 +537,7 @@ function AdminPage() {
           <div className="rounded-[28px] border border-black/10 bg-white p-8">
             <h2 className="text-2xl font-semibold">登录后台</h2>
             <p className="mt-3 text-base leading-7 text-[#666666]">
-              使用你刚刚在 Supabase Authentication 里创建的邮箱和密码。
+              使用你在 Supabase Authentication 里创建的邮箱和密码。
             </p>
 
             <form onSubmit={handleLogin} className="mt-6 grid gap-4">
@@ -430,137 +575,251 @@ function AdminPage() {
             </form>
           </div>
         ) : (
-          <div className="rounded-[28px] border border-black/10 bg-white p-8">
-            <div className="mb-6 flex items-center justify-between gap-4 border-b border-black/10 pb-5">
-              <div>
-                <h2 className="text-2xl font-semibold">新建一张简历卡片</h2>
-                <p className="mt-2 text-base text-[#666666]">
-                  登录账号：{session.user.email}
-                </p>
+          <div className="grid gap-6">
+            <div className="rounded-[28px] border border-black/10 bg-white p-8">
+              <div className="mb-6 flex items-center justify-between gap-4 border-b border-black/10 pb-5">
+                <div>
+                  <h2 className="text-2xl font-semibold">
+                    {form.id ? "编辑卡片" : "新建一张简历卡片"}
+                  </h2>
+                  <p className="mt-2 text-base text-[#666666]">
+                    登录账号：{session.user.email}
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  {form.id && (
+                    <button
+                      type="button"
+                      onClick={handleCancelEdit}
+                      className="rounded-full border border-black/10 px-4 py-2 text-sm font-medium"
+                    >
+                      取消编辑
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={handleLogout}
+                    className="inline-flex items-center gap-2 rounded-full border border-black/10 px-4 py-2 text-sm font-medium"
+                  >
+                    <LogOut className="h-4 w-4" />
+                    退出
+                  </button>
+                </div>
               </div>
 
-              <button
-                type="button"
-                onClick={handleLogout}
-                className="inline-flex items-center gap-2 rounded-full border border-black/10 px-4 py-2 text-sm font-medium"
-              >
-                <LogOut className="h-4 w-4" />
-                退出
-              </button>
-            </div>
-
-            <form onSubmit={handleSubmit} className="grid gap-5">
-              <Field label="标题">
-                <input
-                  value={form.title}
-                  onChange={(e) => setForm({ ...form, title: e.target.value })}
-                  className="w-full rounded-2xl border border-black/10 px-4 py-3 outline-none"
-                  placeholder="例如：平台策略版"
-                />
-              </Field>
-
-              <div className="grid gap-5 md:grid-cols-3">
-                <Field label="方向">
-                  <select
-                    value={form.direction}
-                    onChange={(e) =>
-                      setForm({ ...form, direction: e.target.value })
-                    }
-                    className="w-full rounded-2xl border border-black/10 px-4 py-3 outline-none"
-                  >
-                    <option value="AI产品运营">AI产品运营</option>
-                    <option value="品牌市场">品牌市场</option>
-                    <option value="出海营销">出海营销</option>
-                  </select>
-                </Field>
-
-                <Field label="状态">
-                  <select
-                    value={form.status}
-                    onChange={(e) => setForm({ ...form, status: e.target.value })}
-                    className="w-full rounded-2xl border border-black/10 px-4 py-3 outline-none"
-                  >
-                    <option value="草稿">草稿</option>
-                    <option value="进行中">进行中</option>
-                    <option value="已完成">已完成</option>
-                  </select>
-                </Field>
-
-                <Field label="时间">
+              <form onSubmit={handleSubmit} className="grid gap-5">
+                <Field label="标题">
                   <input
-                    value={form.when_text}
-                    onChange={(e) =>
-                      setForm({ ...form, when_text: e.target.value })
-                    }
+                    value={form.title}
+                    onChange={(e) => setForm({ ...form, title: e.target.value })}
                     className="w-full rounded-2xl border border-black/10 px-4 py-3 outline-none"
-                    placeholder="例如：2026-03-07"
+                    placeholder="例如：平台策略版"
                   />
                 </Field>
+
+                <div className="grid gap-5 md:grid-cols-3">
+                  <Field label="方向">
+                    <select
+                      value={form.direction}
+                      onChange={(e) =>
+                        setForm({ ...form, direction: e.target.value })
+                      }
+                      className="w-full rounded-2xl border border-black/10 px-4 py-3 outline-none"
+                    >
+                      <option value="AI产品运营">AI产品运营</option>
+                      <option value="品牌市场">品牌市场</option>
+                      <option value="出海营销">出海营销</option>
+                    </select>
+                  </Field>
+
+                  <Field label="状态">
+                    <select
+                      value={form.status}
+                      onChange={(e) => setForm({ ...form, status: e.target.value })}
+                      className="w-full rounded-2xl border border-black/10 px-4 py-3 outline-none"
+                    >
+                      <option value="草稿">草稿</option>
+                      <option value="进行中">进行中</option>
+                      <option value="已完成">已完成</option>
+                    </select>
+                  </Field>
+
+                  <Field label="时间">
+                    <input
+                      value={form.when_text}
+                      onChange={(e) =>
+                        setForm({ ...form, when_text: e.target.value })
+                      }
+                      className="w-full rounded-2xl border border-black/10 px-4 py-3 outline-none"
+                      placeholder="例如：2026-03-07"
+                    />
+                  </Field>
+                </div>
+
+                <Field label="目标团队 / 公司">
+                  <input
+                    value={form.company}
+                    onChange={(e) => setForm({ ...form, company: e.target.value })}
+                    className="w-full rounded-2xl border border-black/10 px-4 py-3 outline-none"
+                    placeholder="例如：AI / 互联网公司"
+                  />
+                </Field>
+
+                <Field label="对应 JD">
+                  <input
+                    value={form.jd_title}
+                    onChange={(e) =>
+                      setForm({ ...form, jd_title: e.target.value })
+                    }
+                    className="w-full rounded-2xl border border-black/10 px-4 py-3 outline-none"
+                    placeholder="例如：AI 产品运营 / AI 商业化运营"
+                  />
+                </Field>
+
+                <Field label="这版简历重点">
+                  <textarea
+                    value={form.summary}
+                    onChange={(e) => setForm({ ...form, summary: e.target.value })}
+                    className="min-h-[140px] w-full rounded-2xl border border-black/10 px-4 py-3 outline-none"
+                    placeholder="写这一版最想强调的能力和叙事"
+                  />
+                </Field>
+
+                <Field label="关键词（用中文逗号、英文逗号或换行分隔）">
+                  <textarea
+                    value={form.tags_text}
+                    onChange={(e) =>
+                      setForm({ ...form, tags_text: e.target.value })
+                    }
+                    className="min-h-[100px] w-full rounded-2xl border border-black/10 px-4 py-3 outline-none"
+                    placeholder="例如：AIGC研究，平台策略，商业化表达"
+                  />
+                </Field>
+
+                <Field label="上传 PDF">
+                  <div className="grid gap-3">
+                    <label className="inline-flex w-fit cursor-pointer items-center gap-2 rounded-full border border-black/10 px-4 py-2.5 text-sm font-medium">
+                      <Upload className="h-4 w-4" />
+                      {uploadingPdf ? "上传中…" : "选择 PDF 并上传"}
+                      <input
+                        type="file"
+                        accept="application/pdf"
+                        onChange={handlePdfUpload}
+                        className="hidden"
+                        disabled={uploadingPdf}
+                      />
+                    </label>
+
+                    {uploadMessage && (
+                      <p className="text-sm text-green-700">{uploadMessage}</p>
+                    )}
+                    {uploadError && (
+                      <p className="text-sm text-red-600">{uploadError}</p>
+                    )}
+                  </div>
+                </Field>
+
+                <Field label="PDF 链接">
+                  <input
+                    value={form.pdf_url}
+                    onChange={(e) => setForm({ ...form, pdf_url: e.target.value })}
+                    className="w-full rounded-2xl border border-black/10 px-4 py-3 outline-none"
+                    placeholder="上传成功后会自动填入，也可以手动粘贴 https://..."
+                  />
+                </Field>
+
+                {saveError && <p className="text-sm text-red-600">{saveError}</p>}
+                {saveMessage && (
+                  <p className="text-sm text-green-700">{saveMessage}</p>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="inline-flex w-fit items-center gap-2 rounded-full bg-[#111111] px-5 py-3 text-sm font-medium text-white disabled:opacity-50"
+                >
+                  <Plus className="h-4 w-4" />
+                  {saving
+                    ? "保存中…"
+                    : form.id
+                    ? "更新卡片"
+                    : "保存卡片"}
+                </button>
+              </form>
+            </div>
+
+            <div className="rounded-[28px] border border-black/10 bg-white p-8">
+              <div className="mb-5 flex items-center justify-between border-b border-black/10 pb-4">
+                <div>
+                  <h2 className="text-2xl font-semibold">已有卡片</h2>
+                  <p className="mt-2 text-base text-[#666666]">
+                    点“编辑”会把内容带回上面的表单。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={fetchAdminItems}
+                  className="rounded-full border border-black/10 px-4 py-2 text-sm font-medium"
+                >
+                  刷新列表
+                </button>
               </div>
 
-              <Field label="目标团队 / 公司">
-                <input
-                  value={form.company}
-                  onChange={(e) => setForm({ ...form, company: e.target.value })}
-                  className="w-full rounded-2xl border border-black/10 px-4 py-3 outline-none"
-                  placeholder="例如：AI / 互联网公司"
-                />
-              </Field>
+              {loadingList ? (
+                <p className="text-base text-[#666666]">正在读取卡片列表…</p>
+              ) : adminItems.length === 0 ? (
+                <p className="text-base text-[#666666]">还没有任何卡片。</p>
+              ) : (
+                <div className="grid gap-4">
+                  {adminItems.map((item) => (
+                    <div
+                      key={item.id}
+                      className="rounded-2xl border border-black/10 p-5"
+                    >
+                      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                        <div className="min-w-0">
+                          <div className="mb-2 flex flex-wrap items-center gap-2">
+                            <h3 className="text-lg font-semibold text-[#111111]">
+                              {item.title || "未命名卡片"}
+                            </h3>
+                            <StatusPill status={item.status || "草稿"} />
+                          </div>
+                          <p className="text-sm text-[#666666]">
+                            {item.direction || "未分类"} · {item.company || "未填写目标团队"}
+                          </p>
+                          <p className="mt-2 text-sm text-[#777777]">
+                            时间：{item.when_text || "未设置"} ｜ JD：
+                            {item.jd_title || "未填写"}
+                          </p>
+                        </div>
 
-              <Field label="对应 JD">
-                <input
-                  value={form.jd_title}
-                  onChange={(e) =>
-                    setForm({ ...form, jd_title: e.target.value })
-                  }
-                  className="w-full rounded-2xl border border-black/10 px-4 py-3 outline-none"
-                  placeholder="例如：AI 产品运营 / AI 商业化运营"
-                />
-              </Field>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleEdit(item)}
+                            className="inline-flex items-center gap-2 rounded-full border border-black/10 px-4 py-2 text-sm font-medium"
+                          >
+                            <Pencil className="h-4 w-4" />
+                            编辑
+                          </button>
 
-              <Field label="这版简历重点">
-                <textarea
-                  value={form.summary}
-                  onChange={(e) => setForm({ ...form, summary: e.target.value })}
-                  className="min-h-[140px] w-full rounded-2xl border border-black/10 px-4 py-3 outline-none"
-                  placeholder="写这一版最想强调的能力和叙事"
-                />
-              </Field>
-
-              <Field label="关键词（用中文逗号、英文逗号或换行分隔）">
-                <textarea
-                  value={form.tags_text}
-                  onChange={(e) =>
-                    setForm({ ...form, tags_text: e.target.value })
-                  }
-                  className="min-h-[100px] w-full rounded-2xl border border-black/10 px-4 py-3 outline-none"
-                  placeholder="例如：AIGC研究，平台策略，商业化表达"
-                />
-              </Field>
-
-              <Field label="PDF 链接">
-                <input
-                  value={form.pdf_url}
-                  onChange={(e) => setForm({ ...form, pdf_url: e.target.value })}
-                  className="w-full rounded-2xl border border-black/10 px-4 py-3 outline-none"
-                  placeholder="https://..."
-                />
-              </Field>
-
-              {saveError && <p className="text-sm text-red-600">{saveError}</p>}
-              {saveMessage && (
-                <p className="text-sm text-green-700">{saveMessage}</p>
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(item.id)}
+                            className="inline-flex items-center gap-2 rounded-full border border-red-200 px-4 py-2 text-sm font-medium text-red-600"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                            删除
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               )}
-
-              <button
-                type="submit"
-                disabled={saving}
-                className="inline-flex w-fit items-center gap-2 rounded-full bg-[#111111] px-5 py-3 text-sm font-medium text-white disabled:opacity-50"
-              >
-                <Plus className="h-4 w-4" />
-                {saving ? "保存中…" : "保存卡片"}
-              </button>
-            </form>
+            </div>
           </div>
         )}
       </div>
